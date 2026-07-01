@@ -13,9 +13,9 @@
 (*                                                                            *)
 (******************************************************************************)
 
-let header_file = ref "HEADER"
+type header = | Unknown | Text of string | File of string
 
-let header_text = ref None
+let header : header ref = ref Unknown
 
 let source_files = ref []
 
@@ -106,24 +106,6 @@ let copy_into (ic : in_channel) (oc : out_channel) =
       input_line ic |> output_string oc;       
     done
   with End_of_file -> ()
-
-let space_chars =
-  [' '; '\x0C'; '\r'; '\t']
-
-(* Duplicated from string.ml, splits on a list of chars *)
-let split_on_spaces s =
-  let r = ref [] in
-  let j = ref (String.length s) in
-  for i = String.length s - 1 downto 0 do
-    match String.unsafe_get s i with
-    | '\n' ->
-       r := `Newline :: `Word (String.sub s (i + 1) (!j - i - 1)) :: !r; j := i
-    | ' ' | '\x0C' | '\r' | '\t' -> 
-       r := `Word (String.sub s (i + 1) (!j - i - 1)) :: !r;
-       j := i
-    | _ -> ()
-  done;
-  `Word (String.sub s 0 !j) :: !r
 
 (* Writes a border line "(***********)" *)
 let write_border_line oc =
@@ -217,39 +199,72 @@ let write_header oc (header_words : [`Newline | `Word of string] Seq.t) =
   else begin close_comment (); write_empty_line oc end;
   write_border_line oc
 
-
 let update_header header ic oc =
   write_header oc header;
   let useful_line_opt = ignore_header ic in
   let () =
     match useful_line_opt with
     | None -> ()
-    | Some l -> output_string oc l; output_char oc '\n'
+    | Some l ->
+       if String.trim l <> "" then
+         begin output_string oc l; output_char oc '\n' end
   in
   copy_into ic oc
 
-(* TODO: not a list *)
-let header_words_seq () =
-  let header =
-    match !header_text with
-    | None -> 
-       let ic = open_in !header_file in
-       let res = ref "" in
-       let close () = close_in ic in
-       let () =
-         try
-           res := input_line ic;
-           while true do
-             let l = input_line ic in
-             res := !res ^ "\n" ^ l
-           done
-         with
-         | End_of_file -> close ();
-         | exn -> close (); raise exn
-       in !res
-    | Some t -> t
+let header_words_seq_of_text text =
+  let i = ref 0 in
+  let j = ref (-1) in
+  let len = String.length text in
+  let rec loop () =
+    incr j;
+    if !j = len then
+      let word = String.sub text !i (!j - !i) in
+      Seq.Cons (`Word word, fun () -> Seq.Nil)
+    else
+      match String.get text !j with
+      | '\n' ->
+         let word = String.sub text !i (!j - !i) in
+         i := !j + 1;
+         Seq.Cons (
+           `Word word,
+           fun () -> Seq.Cons (`Newline, loop))
+      | ' ' | '\x0C' | '\r' | '\t' -> 
+         let word = String.sub text !i (!j - !i) in
+         i := !j + 1;
+         Seq.Cons (`Word word, loop)
+      | _ -> loop ()
+  in loop
+
+let header_words_seq_of_file file =
+  let ic = open_in file in
+  let word = ref "" in
+  let rec loop () =
+    try match input_char ic with
+      | '\n' ->
+         let w = !word in
+         word := "";
+         Seq.Cons (
+           `Word w,
+           fun () -> Seq.Cons (`Newline, loop))
+      | ' ' | '\x0C' | '\r' | '\t' -> 
+         let w = !word in
+         word := "";
+         Seq.Cons (`Word w, loop)
+      | c ->
+         word := Format.sprintf "%s%c" !word c; 
+         loop ()
+    with
+    | End_of_file ->
+       Seq.Cons (`Word !word, fun () -> close_in ic; Seq.Nil)
+    | exn -> close_in ic; raise exn
   in
-  header |> split_on_spaces |> List.to_seq
+  loop
+
+let header_words_seq () =
+  match !header with
+  | Unknown -> assert false (* Should be checked beforehand *)
+  | File file -> header_words_seq_of_file file
+  | Text t -> header_words_seq_of_text t
 
 let recopy_into_old ~old ~new_ =
   let< new_ml_file = new_ in
@@ -278,15 +293,27 @@ let anon_fun filename =
 
 let speclist = [
     "-H",
-    Arg.String (fun s -> header_file := s),
+    Arg.String (fun s -> header := File s),
     "Use this header file (default: HEADER)";
 
     "--header",
-    Arg.String (fun s -> header_text := Some s),
+    Arg.String (fun s -> header := Text s),
     "Use this header text"
   ]
+
+let check_config () =
+  if !source_files = []
+  then begin
+      Format.eprintf "Error: no files to add a header";
+      exit 1
+    end;
+  if !header = Unknown then begin
+      Format.eprintf "Error: no header provided (use -H <file>).";
+      exit 2
+    end   
 
 let () =
   Format.printf "Run ez-header...@.";
   Arg.parse speclist anon_fun usage_msg;
+  check_config ();
   run ()
