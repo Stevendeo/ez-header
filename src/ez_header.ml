@@ -2,6 +2,9 @@
 (*                                                                            *)
 (* Copyright (c) 2026 OCamlPro                                                *)
 (*                                                                            *)
+(* Contributeurs:                                                             *)
+(* - Steven de Oliveira <steven.de-oliveira@ocamlpro.com>                     *)
+(*                                                                            *)
 (* All rights reserved.                                                       *)
 (*                                                                            *)
 (* This file is distributed under the terms of the GNU Lesser General Public  *)
@@ -13,6 +16,17 @@
 let header_file = ref "HEADER"
 
 let source_files = ref []
+
+(* Returns the length of an utf8 string *)
+let utf8_length s =
+  let len = ref 0 in
+  for i = 0 to String.length s - 1 do
+    let c = Char.code s.[i] in
+    (* Count bytes that are not UTF-8 continuation bytes (10xxxxxx) *)
+    if (c land 0xC0) <> 0x80 then
+      incr len
+  done;
+  !len
 
 (* Safe open in *)
 let (let<) x f =
@@ -91,17 +105,23 @@ let copy_into (ic : in_channel) (oc : out_channel) =
     done
   with End_of_file -> ()
 
+let space_chars =
+  [' '; '\x0C'; '\r'; '\t']
+
 (* Duplicated from string.ml, splits on a list of chars *)
-let split_on_chars seps s =
+let split_on_spaces s =
   let r = ref [] in
   let j = ref (String.length s) in
   for i = String.length s - 1 downto 0 do
-    if List.mem (String.unsafe_get s i) seps then begin
-      r := String.sub s (i + 1) (!j - i - 1) :: !r;
-      j := i
-    end
+    match String.unsafe_get s i with
+    | '\n' ->
+       r := `Newline :: `Word (String.sub s (i + 1) (!j - i - 1)) :: !r; j := i
+    | ' ' | '\x0C' | '\r' | '\t' -> 
+       r := `Word (String.sub s (i + 1) (!j - i - 1)) :: !r;
+       j := i
+    | _ -> ()
   done;
-  String.sub s 0 !j :: !r
+  `Word (String.sub s 0 !j) :: !r
 
 (* Writes a border line "(***********)" *)
 let write_border_line oc =
@@ -117,7 +137,7 @@ let write_empty_line oc =
   output_string oc "*)\n"
 
 (* Writes a sequence of words as a header. *)
-let write_header oc (header_words : string Seq.t) =
+let write_header oc (header_words : [`Newline | `Word of string] Seq.t) =
   let limit_per_line = 74 in (* 80 - the characters for commenting + margin *)
   (* The current position on the header line being written. *)
   let pos = ref 0 in
@@ -131,16 +151,17 @@ let write_header oc (header_words : string Seq.t) =
     pos := 0
   in
   (* Starts a new line comment line *)
-  let start_line () = output_string oc "(* " in
+  let start_line () = 
+    output_string oc "(* " in
   (* Closes a comment line and starts a new one. *)
   let flush () =
     close_comment ();
-    start_line ()
+    start_line ();
   in
   (* Write a word and updates the cursor position. *)
   let write_word w =
     output_string oc w;
-    pos := !pos + String.length w;
+    pos := !pos + utf8_length w;
     assert (!pos <= limit_per_line);
   in
   (* Writes a space if it is not the start of a line.
@@ -157,38 +178,41 @@ let write_header oc (header_words : string Seq.t) =
       end
   in
   let rec loop seq = match seq () with
-    | Seq.Nil -> close_comment ()
+    | Seq.Nil -> ()
     | Cons (word, rest) -> treat_word word rest
   and treat_word word rest =
-    let wlen = String.length word in
-    if wlen = 0 then begin (* This should be a new line *)
-      if !pos <> 0 then flush (); flush (); loop rest
-    end else if wlen >= limit_per_line then begin (* Word too long for the line *)
-        if !pos <> 0 then flush ();
-        let pre = String.sub word 0 limit_per_line
-        and post = String.sub word limit_per_line (String.length word - limit_per_line) in
-        write_word pre;
-        flush ();
-        treat_word post rest
-      end else
-      if wlen + !pos >= limit_per_line then begin
-          (* Word too long for the rest of the line. *)
-          flush ();
-          write_word word;
-          write_space ();
-          loop rest
-        end
-      else begin
-        write_word word;
-        write_space ();
-        loop rest
-      end
+    match word with
+    | `Newline -> flush (); loop rest
+    | `Word word -> 
+       let wlen = utf8_length word in
+       if wlen >= limit_per_line then begin (* Word too long for the line *)
+           if !pos <> 0 then flush ();
+           let pre = String.sub word 0 limit_per_line
+           and post = String.sub word limit_per_line (wlen - limit_per_line) in
+           write_word pre;
+           flush ();
+           treat_word (`Word post) rest
+         end else
+         if wlen + !pos > limit_per_line then begin
+             (* Word too long for the rest of the line. *)
+             flush ();
+             write_word word;
+             write_space ();
+             loop rest
+           end
+         else begin
+             write_word word;
+             write_space ();
+             loop rest
+           end
   in
   write_border_line oc;
   write_empty_line oc;
   start_line ();
   loop header_words;
-  write_empty_line oc;
+  if !pos = 0
+  then close_comment ()
+  else begin close_comment (); write_empty_line oc end;
   write_border_line oc
 
 
@@ -201,9 +225,6 @@ let update_header header ic oc =
     | Some l -> output_string oc l; output_char oc '\n'
   in
   copy_into ic oc
-
-let space_chars =
-  [' '; '\x0C'; '\n'; '\r'; '\t']
 
 (* TODO: not a list *)
 let header_words_seq header_file =
@@ -221,7 +242,7 @@ let header_words_seq header_file =
     | End_of_file -> close ();
     | exn -> close (); raise exn
   in
-  let l = !res |> split_on_chars space_chars in
+  let l = split_on_spaces !res in
   List.to_seq l
 
 let recopy_into_old ~old ~new_ =
@@ -253,5 +274,6 @@ let speclist =
   [("-H", Arg.String (fun s -> header_file := s), "Use this header file (default: HEADER)")]
 
 let () =
+  Format.printf "Run ez-header...@.";
   Arg.parse speclist anon_fun usage_msg;
   run ()

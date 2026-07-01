@@ -4,10 +4,12 @@ all: build
 
 _build:
 	mkdir _build
-	cp -r src _build/src
 
-build: _build
-	ocamlc -o ez-header _build/src/ez_header.ml
+_build/src/ez_header.ml: src/ez_header.ml | _build
+	cp $< $@
+
+build: _build/src/ez_header.ml
+	ocamlc -o ez-header $<
 
 clean:
 	rm -rf _build
