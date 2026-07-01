@@ -3,7 +3,7 @@
 all: build
 
 _build:
-	mkdir _build
+	mkdir -p _build/src
 
 _build/src/ez_header.ml: src/ez_header.ml | _build
 	cp $< $@

@@ -15,6 +15,8 @@
 
 let header_file = ref "HEADER"
 
+let header_text = ref None
+
 let source_files = ref []
 
 (* Returns the length of an utf8 string *)
@@ -227,23 +229,27 @@ let update_header header ic oc =
   copy_into ic oc
 
 (* TODO: not a list *)
-let header_words_seq header_file =
-  let ic = open_in header_file in
-  let res = ref "" in
-  let close () = close_in ic in
-  let () =
-    try
-      res := input_line ic;
-      while true do
-        let l = input_line ic in
-        res := !res ^ "\n" ^ l
-      done
-    with
-    | End_of_file -> close ();
-    | exn -> close (); raise exn
+let header_words_seq () =
+  let header =
+    match !header_text with
+    | None -> 
+       let ic = open_in !header_file in
+       let res = ref "" in
+       let close () = close_in ic in
+       let () =
+         try
+           res := input_line ic;
+           while true do
+             let l = input_line ic in
+             res := !res ^ "\n" ^ l
+           done
+         with
+         | End_of_file -> close ();
+         | exn -> close (); raise exn
+       in !res
+    | Some t -> t
   in
-  let l = split_on_spaces !res in
-  List.to_seq l
+  header |> split_on_spaces |> List.to_seq
 
 let recopy_into_old ~old ~new_ =
   let< new_ml_file = new_ in
@@ -262,16 +268,23 @@ let run_for_file ~header_words f =
   recopy_into_old ~old:f ~new_:ml_res_file_name
 
 let run () =
-  let header_words = header_words_seq !header_file in
+  let header_words = header_words_seq () in
   List.iter (run_for_file ~header_words) !source_files
 
-let usage_msg = "ez-header <file1> [<file2>] -H <header_file>"
+let usage_msg = "ez-header <file1> [<file2>] (-H <header_file>) (--header <text>)"
 
 let anon_fun filename =
   source_files := filename :: !source_files
 
-let speclist =
-  [("-H", Arg.String (fun s -> header_file := s), "Use this header file (default: HEADER)")]
+let speclist = [
+    "-H",
+    Arg.String (fun s -> header_file := s),
+    "Use this header file (default: HEADER)";
+
+    "--header",
+    Arg.String (fun s -> header_text := Some s),
+    "Use this header text"
+  ]
 
 let () =
   Format.printf "Run ez-header...@.";
