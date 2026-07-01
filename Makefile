@@ -13,3 +13,4 @@ build: _build/src/ez_header.ml
 
 clean:
 	rm -rf _build
+	rm -f ez-header
